@@ -558,3 +558,39 @@ func (l *Conn) NTLMChallengeBind(ntlmBindRequest *NTLMBindRequest) (*NTLMBindRes
 	err = GetLDAPError(packet)
 	return result, err
 }
+
+// NTLMBindRequest represents an NTLMSSPI bind operation using current user credentials
+type NTLMSSPIBindRequest struct {
+	// credential    *sspi.Credentials
+	// clientContext *ntlm.ClientContext
+	msg []byte
+	// Controls are optional controls to send with the bind request
+	Controls []Control
+}
+
+func (req *NTLMSSPIBindRequest) appendTo(envelope *ber.Packet) error {
+	request := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ApplicationBindRequest, nil, "Bind Request")
+	request.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 3, "Version"))
+	request.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "User Name"))
+
+	// append the generated NTLMSSP message as a TagEnumerated BER value
+	auth := ber.Encode(ber.ClassContext, ber.TypePrimitive, ber.TagEnumerated, req.msg, "authentication")
+	request.AppendChild(auth)
+	envelope.AppendChild(request)
+	if len(req.Controls) > 0 {
+		envelope.AppendChild(encodeControls(req.Controls))
+	}
+	return nil
+}
+
+// NTLMSSPIBindResult contains the response from the server
+type NTLMSSPIBindResult struct {
+	Controls []Control
+}
+
+// NTLMBind performs an NTLMSSP Bind with the given domain, username and password
+func (l *Conn) NTLMSSPIBind() error {
+	req := &NTLMSSPIBindRequest{}
+	_, err := l.NTLMSSPIChallengeBind(req)
+	return err
+}
