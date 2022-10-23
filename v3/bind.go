@@ -12,6 +12,8 @@ import (
 
 	"github.com/Azure/go-ntlmssp"
 	ber "github.com/go-asn1-ber/asn1-ber"
+	"github.com/jcmturner/gokrb5/v8/client"
+	"github.com/jcmturner/gokrb5/v8/spnego"
 )
 
 // SimpleBindRequest represents a username/password bind operation
@@ -593,4 +595,90 @@ func (l *Conn) NTLMSSPIBind() error {
 	req := &NTLMSSPIBindRequest{}
 	_, err := l.NTLMSSPIChallengeBind(req)
 	return err
+}
+
+// GSSAPI Bind using gokrb5
+type GSSAPIBindRequest struct {
+	// Service Principal Name to try to get a service ticket for. With LDAP in
+	// most cases this will be "ldap/<hostname>"
+	SPN string
+	// Authorization entity to authenticate as
+	user string
+	// KRB5 client as an abstraction over Credentials coming from a keytab,
+	// ccache or freshly acquired from the KDC
+	client *client.Client
+	// Token
+	token []byte
+	// Controls are optional controls to send with the bind request
+	Controls []Control
+}
+
+// GSSAPIBindResult contains the response from the server
+type GSSAPIBindResult struct {
+	Controls []Control
+}
+
+// GSSAPI Bind
+func (l *Conn) GSSAPICCBindCCache(cl *client.Client, spn string) (*GSSAPIBindResult, error) {
+
+	var err error
+	result := &GSSAPIBindResult{
+		Controls: make([]Control, 0),
+	}
+
+	username := cl.Credentials.UserName()
+	cl.Login()
+
+	sp := spnego.SPNEGOClient(cl, spn)
+	sp_token, err := sp.InitSecContext()
+	if err != nil {
+		return result, err
+	}
+	token, err := sp_token.Marshal()
+	if err != nil {
+		return result, err
+	}
+
+	req := &GSSAPIBindRequest{
+		SPN:    spn,
+		user:   username,
+		token:  token,
+		client: cl,
+	}
+
+	// Send request steps
+	msgCtx, err := l.doRequest(req)
+	if err != nil {
+		return result, err
+	}
+	defer l.finishMessage(msgCtx)
+
+	packet, err := l.readPacket(msgCtx)
+	if err != nil {
+		return result, err
+	}
+	l.Debug.Printf("%d: got response %p", msgCtx.id, packet)
+	if l.Debug {
+		if err = addLDAPDescriptions(packet); err != nil {
+			return result, err
+		}
+		ber.PrintPacket(packet)
+	}
+	return result, err
+}
+
+func (req *GSSAPIBindRequest) appendTo(envelope *ber.Packet) error {
+	request := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ApplicationBindRequest, nil, "Bind Request")
+	request.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, 3, "Version"))
+	request.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, req.user, "User Name"))
+
+	auth := ber.Encode(ber.ClassContext, ber.TypeConstructed, 3, "", "authentication")
+	auth.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "GSS-SPNEGO", "SASL Mech"))
+	auth.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, string(req.token[:]), "Credentials"))
+	request.AppendChild(auth)
+	envelope.AppendChild(request)
+	if len(req.Controls) > 0 {
+		envelope.AppendChild(encodeControls(req.Controls))
+	}
+	return nil
 }
